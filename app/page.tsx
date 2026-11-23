@@ -227,7 +227,7 @@ export default function HomePage() {
         {/* Encabezado */}
         <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
           <div>
-            <h1 className="text-2xl font-bold text-gray-800">Panel de Pedidos</h1>
+            <h1 className="text-2xl font-bold text-gray-800">Panel de Pedidos 📦</h1>
             {loteActivo && (
               <p className="text-sm text-green-600 font-medium">
                 Lote activo iniciado el {new Date(loteActivo.creado_en).toLocaleDateString()}
