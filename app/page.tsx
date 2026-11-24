@@ -14,8 +14,8 @@ export default function HomePage() {
 
   const [pedidos, setPedidos] = useState<any[]>([])
   const [loteActivo, setLoteActivo] = useState<any>(null)
-  const [resumenEmbolsar, setResumenEmbolsar] = useState<any[]>([])
   const [inventarioDisponible, setInventarioDisponible] = useState<any[]>([])
+  const [resumenEmbolsar, setResumenEmbolsar] = useState<any[]>([])
   const [totales, setTotales] = useState({ 
     clientes: 0, 
     recaudar: 0, 
@@ -40,7 +40,6 @@ export default function HomePage() {
   async function cargarDatos() {
     setCargando(true)
     
-    // 1. Obtener el lote activo
     const { data: lotes } = await supabase
       .from('lotes')
       .select('*')
@@ -57,9 +56,9 @@ export default function HomePage() {
     const lote = lotes[0]
     setLoteActivo(lote)
 
-    // 2. Obtener datos de la base para calcular
     const { data: prods } = await supabase.from('productos').select('*')
     const { data: invData } = await supabase.from('lote_items').select('*').eq('lote_id', lote.id)
+    
     const { data: pedidosData } = await supabase
       .from('pedidos')
       .select(`
@@ -77,76 +76,85 @@ export default function HomePage() {
       let recaudar = 0
       let costoInvertido = 0
       const clientesUnicos = new Set()
-      const ventasPorProducto: { [key: number]: number } = {}
       
-      // A. Calcular ventas y totales de pedidos
+      // A. Calcular totales de pedidos (recaudar)
       pedidosData.forEach(p => {
         recaudar += Number(p.total)
         const clienteObj = p.clientes as any
         if (clienteObj?.nombre) clientesUnicos.add(clienteObj.nombre)
+      })
 
+      // B. Calcular costo invertido
+      invData?.forEach(inv => {
+        costoInvertido += Number(inv.costo_caja || 0)
+      })
+
+      // C. Calcular Inventario Disponible (Sobrantes)
+      const resumenInv: any[] = []
+      const ventasPorProducto: { [key: number]: number } = {}
+      
+      pedidosData.forEach(p => {
         p.pedido_items.forEach((item: any) => {
           ventasPorProducto[item.producto_id] = (ventasPorProducto[item.producto_id] || 0) + item.cantidad_promos
         })
       })
 
-      // B. Calcular Costo Invertido (lo que pagaste al proveedor)
-      // C. Calcular Inventario Disponible
-      const resumenInv: any[] = []
       prods.forEach(prod => {
         const invItem = invData?.find(i => i.producto_id === prod.id)
-        
-        let unidadesCompradas = 0
         if (invItem) {
-          // Si es caja fija (Uvas/Arándanos), calculamos por cajas * 18
-          const esCajaFija = prod.nombre.includes('Uva') || prod.nombre.includes('Arándano')
-          if (esCajaFija) {
-            unidadesCompradas = (invItem.cajas || 0) * 18
-          } else {
-            unidadesCompradas = invItem.unidades_reales || 0
-          }
-          
-          const mermas = invItem.mermas || 0
-          costoInvertido += (invItem.cajas || 0) * (prod.precio_costo_caja || 0)
-          
-          const totalDisponible = unidadesCompradas - mermas
-          const promosDisponibles = totalDisponible / prod.unidades_por_promo
+          const unidadesBase = invItem.unidades_reales || (invItem.cajas * (prod.unidades_por_caja || 18))
+          const totalDisponible = unidadesBase - (invItem.mermas || 0)
+          const promosDisponibles = totalDisponible / (prod.unidades_por_promo || 1)
           const vendido = ventasPorProducto[prod.id] || 0
           const sobrante = promosDisponibles - vendido
 
-          if (unidadesCompradas > 0) {
-            resumenInv.push({
-              nombre: prod.nombre,
-              unidadesCompradas,
-              mermas,
-              vendido,
-              sobrante
-            })
-          }
+          resumenInv.push({
+            nombre: prod.nombre,
+            tipoVenta: prod.tipo_venta,
+            sobrante: sobrante,
+            unidadesBase: unidadesBase
+          })
         }
       })
       setInventarioDisponible(resumenInv)
 
-      // D. Calcular Resumen para Embolsar
-      const agrupado: { [key: number]: number } = {}
+      // D. Calcular Resumen para Embolsar Agrupado
+      const agrupado: { [key: string]: { [cantidad: number]: number } } = {}
+      
       pedidosData.forEach(pedido => {
         pedido.pedido_items.forEach((item: any) => {
-          agrupado[item.producto_id] = (agrupado[item.producto_id] || 0) + item.cantidad_promos
+          const prod = prods.find(p => p.id === item.producto_id)
+          if (prod) {
+            if (!agrupado[prod.nombre]) agrupado[prod.nombre] = {}
+            // Redondeamos por si hay decimales (naranjas sueltas)
+            const cant = Math.round(item.cantidad_promos * 100) / 100
+            if (!agrupado[prod.nombre][cant]) agrupado[prod.nombre][cant] = 0
+            agrupado[prod.nombre][cant] += 1
+          }
         })
       })
 
-      const resumenArray = Object.entries(agrupado).map(([prodId, cantidad]) => {
-        const prod = prods.find(p => p.id === Number(prodId))
-        return { nombre: prod?.nombre || 'Desconocido', cantidad }
-      }).filter(item => item.cantidad > 0)
+      const resumenArray = Object.keys(agrupado).map(nombreProd => {
+        const cantidades = Object.entries(agrupado[nombreProd]).map(([cant, clientes]) => ({
+          cantidad: Number(cant),
+          clientes: clientes
+        })).sort((a, b) => b.cantidad - a.cantidad) // Ordenar de mayor a menor
 
+        const prodInfo = prods.find(p => p.nombre === nombreProd)
+        
+        return {
+          nombre: nombreProd,
+          tipoVenta: prodInfo?.tipo_venta,
+          detalles: cantidades
+        }
+      })
       setResumenEmbolsar(resumenArray)
-      
+
       setTotales({
         clientes: clientesUnicos.size,
         recaudar: recaudar,
         costoInvertido: costoInvertido,
-        gananciaNeta: recaudar - costoInvertido // Ganancia provisional
+        gananciaNeta: recaudar - costoInvertido
       })
     }
     setCargando(false)
@@ -154,19 +162,14 @@ export default function HomePage() {
 
   const generarPDF = () => {
     const doc = new jsPDF()
-    
-    // Título y datos del lote
     doc.setFontSize(18)
     doc.text('Frutas Esperanza - Reporte de Pedidos', 14, 20)
     
     doc.setFontSize(10)
     doc.setTextColor(100)
-    if (loteActivo) {
-      doc.text(`Lote: ${new Date(loteActivo.creado_en).toLocaleDateString()}`, 14, 28)
-    }
+    if (loteActivo) doc.text(`Lote: ${new Date(loteActivo.creado_en).toLocaleDateString()}`, 14, 28)
     doc.text(`Generado el: ${new Date().toLocaleString()}`, 14, 33)
     
-    // Tabla de Pedidos
     const tableData = pedidos.map(p => [
       p.clientes?.nombre || 'Sin nombre',
       p.clientes?.telefono || 'Sin tel.',
@@ -180,37 +183,40 @@ export default function HomePage() {
       head: [['Cliente', 'Teléfono', 'Entrega', 'Estado', 'Total']],
       body: tableData,
       theme: 'grid',
-      headStyles: { fillColor: [22, 163, 74] }, // Verde
+      headStyles: { fillColor: [22, 163, 74] },
       styles: { fontSize: 9 },
     })
 
-    // Resumen de Recaudación
     const finalY = (doc as any).lastAutoTable.finalY || 100
     doc.setFontSize(12)
     doc.setTextColor(0)
     doc.text(`Total a Recaudar: $${totales.recaudar.toFixed(2)}`, 14, finalY + 10)
     doc.text(`Ganancia Proyectada: $${totales.gananciaNeta.toFixed(2)}`, 14, finalY + 17)
 
-    // Resumen para Embolsar
     if (resumenEmbolsar.length > 0) {
       doc.text('Resumen para Embolsar:', 14, finalY + 30)
       
-      const embolsarData = resumenEmbolsar.map(item => [
-        item.nombre,
-        `${item.cantidad} promos`
-      ])
+      const embolsarData: any[] = []
+      resumenEmbolsar.forEach(item => {
+        item.detalles.forEach((d: any) => {
+          const unidad = item.tipoVenta === 'libras' ? 'libras' : item.tipoVenta === 'cajitas' ? 'cajitas' : 'promos'
+          embolsarData.push([
+            item.nombre,
+            `${d.clientes} cliente(s) quieren ${d.cantidad} ${unidad}`
+          ])
+        })
+      })
 
       autoTable(doc, {
         startY: finalY + 35,
         head: [['Producto', 'Cantidad a Preparar']],
         body: embolsarData,
         theme: 'striped',
-        headStyles: { fillColor: [59, 130, 246] }, // Azul
+        headStyles: { fillColor: [59, 130, 246] },
         styles: { fontSize: 9 },
       })
     }
 
-    // Guardar el PDF
     doc.save(`Reporte_Frutas_${new Date().toISOString().slice(0, 10)}.pdf`)
   }
 
@@ -224,20 +230,16 @@ export default function HomePage() {
     <ClientWrapper>
       <div className="space-y-6 max-w-6xl mx-auto p-4">
         
-        {/* Encabezado */}
         <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
           <div>
-            <h1 className="text-2xl font-bold text-gray-800">Panel de Pedidos 📦</h1>
+            <h1 className="text-2xl font-bold text-gray-800">Panel de Pedidos</h1>
             {loteActivo && (
               <p className="text-sm text-green-600 font-medium">
                 Lote activo iniciado el {new Date(loteActivo.creado_en).toLocaleDateString()}
               </p>
             )}
           </div>
-          <button 
-            onClick={generarPDF}
-            className="bg-red-600 text-white px-4 py-2 rounded-lg font-bold hover:bg-red-700 transition flex items-center gap-2 shadow-sm w-full sm:w-auto justify-center"
-          >
+          <button onClick={generarPDF} className="bg-red-600 text-white px-4 py-2 rounded-lg font-bold hover:bg-red-700 transition flex items-center gap-2 shadow-sm w-full sm:w-auto justify-center">
             📄 Descargar Reporte PDF
           </button>
         </div>
@@ -256,7 +258,7 @@ export default function HomePage() {
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
               <div className="bg-white p-4 rounded-xl shadow-sm border border-gray-200">
                 <p className="text-sm text-gray-500 font-medium">Clientes (Pedidos)</p>
-                <p className="text-3xl font-bold text-gray-800">{pedidos.length}</p>
+                <p className="text-3xl font-bold text-gray-800">{totales.clientes}</p>
               </div>
               <div className="bg-white p-4 rounded-xl shadow-sm border border-gray-200">
                 <p className="text-sm text-gray-500 font-medium">Total a Recaudar</p>
@@ -272,15 +274,13 @@ export default function HomePage() {
               </div>
             </div>
 
-            {/* Inventario Disponible (NUEVA SECCIÓN) */}
+            {/* Inventario Disponible */}
             <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
               <div className="p-4 border-b border-gray-200 bg-blue-50">
                 <h2 className="font-bold text-blue-800">📦 Disponibles para Vender (Sobrantes)</h2>
-                <p className="text-sm text-blue-600">Lo que trajo el proveedor menos las mermas y lo ya vendido</p>
               </div>
               <div className="p-4 grid grid-cols-2 sm:grid-cols-3 md:grid-cols-6 gap-4">
                 {inventarioDisponible.map((item, idx) => {
-                  const nombreCorto = item.nombre.split(' ')[0] // Uva, Mandarina, Pera...
                   const esNegativo = item.sobrante < 0
                   return (
                     <div key={idx} className={`p-3 rounded-lg text-center border ${esNegativo ? 'bg-red-50 border-red-200' : 'bg-gray-50 border-gray-100'}`}>
@@ -288,16 +288,9 @@ export default function HomePage() {
                       <p className={`text-2xl font-bold ${esNegativo ? 'text-red-600' : 'text-gray-800'}`}>
                         {item.sobrante % 1 === 0 ? item.sobrante : item.sobrante.toFixed(2)}
                       </p>
-                      <p className="text-xs text-gray-400 mb-2">disponibles</p>
-                      
-                      {/* Barra de progreso visual */}
-                      <div className="w-full bg-gray-200 rounded-full h-1.5 mt-2">
-                        <div 
-                          className={`h-1.5 rounded-full ${esNegativo ? 'bg-red-500' : 'bg-green-500'}`} 
-                          style={{ width: `${Math.max(0, Math.min(100, (item.sobrante / (item.unidadesCompradas / 3)) * 100))}%` }}
-                        ></div>
-                      </div>
-                      <p className="text-xs text-gray-400 mt-1">de {item.unidadesCompradas} uds</p>
+                      <p className="text-xs text-gray-400 mb-2">
+                        {item.tipoVenta === 'libras' ? 'libras' : item.tipoVenta === 'cajitas' ? 'cajitas' : 'promos'}
+                      </p>
                     </div>
                   )
                 })}
@@ -307,7 +300,7 @@ export default function HomePage() {
               </div>
             </div>
 
-            {/* Tabla de Pedidos (Responsiva) */}
+            {/* Tabla de Pedidos */}
             <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
               <div className="p-4 border-b border-gray-200 bg-gray-50 flex justify-between items-center">
                 <h2 className="font-bold text-gray-700">Lista de Pedidos</h2>
@@ -395,26 +388,29 @@ export default function HomePage() {
                   </div>
                 ))}
               </div>
-
-              {pedidos.length === 0 && (
-                <div className="p-8 text-center text-gray-500">
-                  Aún no hay pedidos en este lote. ¡Crea el primero!
-                </div>
-              )}
             </div>
 
-            {/* Resumen para Embolsar */}
+            {/* Resumen para Embolsar Agrupado */}
             <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden mt-6">
               <div className="p-4 border-b border-gray-200 bg-green-50">
-                <h2 className="font-bold text-green-800">📦 Resumen para Embolsar</h2>
-                <p className="text-sm text-green-600">Cantidad total de promos a preparar de este lote</p>
+                <h2 className="font-bold text-green-800">📦 Resumen para Embolsar (Agrupado)</h2>
+                <p className="text-sm text-green-600">Así debes preparar las bolsas para cada cliente</p>
               </div>
-              <div className="p-4 grid grid-cols-2 sm:grid-cols-3 md:grid-cols-6 gap-4">
+              <div className="p-4 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
                 {resumenEmbolsar.map((item, idx) => (
-                  <div key={idx} className="bg-gray-50 p-3 rounded-lg text-center border border-gray-100">
-                    <p className="text-xs text-gray-500 font-medium mb-1 truncate">{item.nombre}</p>
-                    <p className="text-2xl font-bold text-gray-800">{item.cantidad}</p>
-                    <p className="text-xs text-gray-400">promos</p>
+                  <div key={idx} className="bg-gray-50 p-4 rounded-lg border border-gray-200">
+                    <h3 className="font-bold text-gray-800 mb-2 border-b pb-1">{item.nombre}</h3>
+                    <ul className="space-y-1">
+                      {item.detalles.map((det: any, i: number) => {
+                        const unidad = item.tipoVenta === 'libras' ? 'libras' : item.tipoVenta === 'cajitas' ? 'cajitas' : 'promos'
+                        return (
+                          <li key={i} className="flex justify-between text-sm">
+                            <span className="text-gray-600">{det.clientes} cliente(s) quieren:</span>
+                            <span className="font-bold text-gray-800">{det.cantidad} {unidad}</span>
+                          </li>
+                        )
+                      })}
+                    </ul>
                   </div>
                 ))}
                 {resumenEmbolsar.length === 0 && (

@@ -5,13 +5,25 @@ import ClientWrapper from '../ClientWrapper'
 import Link from 'next/link'
 
 export default function InventarioPage() {
-  const [productos, setProductos] = useState<any[]>([])
+  const [inventario, setInventario] = useState<any[]>([])
   const [loteActivo, setLoteActivo] = useState<any>(null)
-  
-  // Guardamos cajas y unidades reales
-  const [inventario, setInventario] = useState<{ [key: number]: { cajas: number, unidades_reales: number, mermas: number } }>({})
   const [ventasPorProducto, setVentasPorProducto] = useState<{ [key: number]: number }>({})
   const [guardando, setGuardando] = useState(false)
+
+  // Estados para el formulario de agregar fruta
+  const [mostrarForm, setMostrarForm] = useState(false)
+  const [nuevoProdNombre, setNuevoProdNombre] = useState('')
+  const [tipoCaja, setTipoCaja] = useState('completa')
+  const [costoCaja, setCostoCaja] = useState('')
+  const [cantidadTrae, setCantidadTrae] = useState('')
+  const [tipoVenta, setTipoVenta] = useState('promocion')
+  const [unidadesPorPromo, setUnidadesPorPromo] = useState('3')
+  const [precioVenta, setPrecioVenta] = useState('')
+
+  // Estados para edición
+  const [editandoItem, setEditandoItem] = useState<any>(null)
+  const [editCantidad, setEditCantidad] = useState('')
+  const [editMermas, setEditMermas] = useState('')
 
   const supabase = createClient()
 
@@ -20,9 +32,6 @@ export default function InventarioPage() {
   }, [])
 
   async function cargarDatos() {
-    const { data: prods } = await supabase.from('productos').select('*').order('id')
-    if (prods) setProductos(prods)
-
     const { data: lotes } = await supabase
       .from('lotes').select('*').eq('estado', 'abierto').order('creado_en', { ascending: false }).limit(1)
 
@@ -30,18 +39,12 @@ export default function InventarioPage() {
       const lote = lotes[0]
       setLoteActivo(lote)
 
-      const { data: items } = await supabase.from('lote_items').select('*').eq('lote_id', lote.id)
-      if (items) {
-        const invTemp: any = {}
-        items.forEach(item => {
-          invTemp[item.producto_id] = { 
-            cajas: item.cajas || 0,
-            unidades_reales: item.unidades_reales || 0, 
-            mermas: item.mermas || 0 
-          }
-        })
-        setInventario(invTemp)
-      }
+      const { data: items } = await supabase
+        .from('lote_items')
+        .select(`*, productos (*)`)
+        .eq('lote_id', lote.id)
+      
+      if (items) setInventario(items)
 
       const { data: pedidos } = await supabase
         .from('pedidos')
@@ -68,29 +71,85 @@ export default function InventarioPage() {
     if (error) alert('Error: ' + error.message)
     else {
       setLoteActivo(data)
-      setInventario({})
+      setInventario([])
       setVentasPorProducto({})
       cargarDatos()
     }
     setGuardando(false)
   }
 
-  async function guardarInventario() {
+  async function agregarProducto(e: React.FormEvent) {
+    e.preventDefault()
     if (!loteActivo) return alert('Primero debes iniciar un lote.')
     setGuardando(true)
-    
-    const itemsAGuardar = Object.entries(inventario).map(([prodId, datos]) => ({
-      lote_id: loteActivo.id,
-      producto_id: Number(prodId),
-      cajas: datos.cajas,
-      unidades_reales: datos.unidades_reales,
-      mermas: datos.mermas
-    }))
 
-    await supabase.from('lote_items').delete().eq('lote_id', loteActivo.id)
-    const { error } = await supabase.from('lote_items').insert(itemsAGuardar)
-    if (error) alert('Error al guardar: ' + error.message)
-    else alert('¡Inventario guardado!')
+    // 1. Crear o buscar el producto
+    let { data: prodData } = await supabase.from('productos').select('*').eq('nombre', nuevoProdNombre).single()
+    
+    if (!prodData) {
+      const { data: newProd, error: errProd } = await supabase.from('productos').insert([{
+        nombre: nuevoProdNombre,
+        precio_promo: tipoVenta === 'promocion' ? Number(precioVenta) : Number(precioVenta),
+        precio_unitario: tipoVenta === 'promocion' ? Number(precioVenta) / Number(unidadesPorPromo) : null,
+        unidades_por_promo: tipoVenta === 'promocion' ? Number(unidadesPorPromo) : 1,
+        tipo_venta: tipoVenta,
+        unidades_por_caja: Number(cantidadTrae)
+      }]).select().single()
+
+      if (errProd) {
+        alert('Error al crear producto: ' + errProd.message)
+        setGuardando(false)
+        return
+      }
+      prodData = newProd
+    }
+
+    // 2. Guardar el item en el lote
+    const { error: errItem } = await supabase.from('lote_items').insert([{
+      lote_id: loteActivo.id,
+      producto_id: prodData.id,
+      cajas: tipoCaja === 'completa' ? 1 : 0.5,
+      unidades_reales: Number(cantidadTrae),
+      costo_caja: Number(costoCaja),
+      tipo_caja: tipoCaja,
+      mermas: 0
+    }])
+
+    if (errItem) alert('Error al guardar en lote: ' + errItem.message)
+    else {
+      alert('¡Fruta agregada al lote!')
+      setMostrarForm(false)
+      setNuevoProdNombre('')
+      setCostoCaja('')
+      setCantidadTrae('')
+      setPrecioVenta('')
+      cargarDatos()
+    }
+    setGuardando(false)
+  }
+
+  // --- FUNCIÓN PARA EDITAR ---
+  function abrirEdicion(item: any) {
+    setEditandoItem(item)
+    setEditCantidad(item.unidades_reales ? item.unidades_reales.toString() : '')
+    setEditMermas(item.mermas ? item.mermas.toString() : '0')
+  }
+
+  async function guardarEdicion(e: React.FormEvent) {
+    e.preventDefault()
+    if (!editandoItem) return
+    setGuardando(true)
+
+    const { error } = await supabase.from('lote_items').update({
+      unidades_reales: Number(editCantidad),
+      mermas: Number(editMermas)
+    }).eq('id', editandoItem.id)
+
+    if (error) alert('Error al actualizar: ' + error.message)
+    else {
+      setEditandoItem(null)
+      cargarDatos()
+    }
     setGuardando(false)
   }
 
@@ -101,23 +160,10 @@ export default function InventarioPage() {
     
     if (error) alert('Error al cerrar: ' + error.message)
     else {
-      alert('Lote cerrado con éxito. La pantalla de inicio se limpiará para el próximo ciclo.')
+      alert('Lote cerrado con éxito.')
       window.location.reload()
     }
     setGuardando(false)
-  }
-
-  const handleInput = (prodId: number, campo: 'cajas' | 'unidades_reales' | 'mermas', valor: string) => {
-    const num = Number(valor) || 0
-    setInventario(prev => ({
-      ...prev,
-      [prodId]: {
-        cajas: prev[prodId]?.cajas || 0,
-        unidades_reales: prev[prodId]?.unidades_reales || 0,
-        mermas: prev[prodId]?.mermas || 0,
-        [campo]: num
-      }
-    }))
   }
 
   return (
@@ -144,14 +190,67 @@ export default function InventarioPage() {
               </button>
             </div>
 
+            {/* Formulario para agregar fruta */}
+            <div className="bg-white p-4 rounded-xl shadow-sm border">
+              <button 
+                onClick={() => setMostrarForm(!mostrarForm)}
+                className="w-full bg-green-600 text-white p-3 rounded-lg font-bold hover:bg-green-700 mb-4"
+              >
+                {mostrarForm ? 'Cancelar' : '+ Agregar Fruta al Lote'}
+              </button>
+
+              {mostrarForm && (
+                <form onSubmit={agregarProducto} className="space-y-4 bg-gray-50 p-4 rounded-lg border">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-1">Nombre de la fruta</label>
+                      <input type="text" value={nuevoProdNombre} onChange={(e) => setNuevoProdNombre(e.target.value)} required className="border p-2 rounded w-full" placeholder="Ej. Manzana verde" />
+                    </div>
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-1">Tipo de Caja</label>
+                      <select value={tipoCaja} onChange={(e) => setTipoCaja(e.target.value)} className="border p-2 rounded w-full bg-white">
+                        <option value="completa">Caja Completa</option>
+                        <option value="media">Media Caja</option>
+                      </select>
+                    </div>
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-1">Costo de la caja ($)</label>
+                      <input type="number" step="0.01" value={costoCaja} onChange={(e) => setCostoCaja(e.target.value)} required className="border p-2 rounded w-full" placeholder="Ej. 44.00" />
+                    </div>
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-1">¿Cuánto trae? (Unidades/Libras/Cajitas)</label>
+                      <input type="number" value={cantidadTrae} onChange={(e) => setCantidadTrae(e.target.value)} required className="border p-2 rounded w-full" placeholder="Ej. 84" />
+                    </div>
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-1">¿Cómo se vende?</label>
+                      <select value={tipoVenta} onChange={(e) => setTipoVenta(e.target.value)} className="border p-2 rounded w-full bg-white">
+                        <option value="promocion">Por Promoción (ej. 3x1.25)</option>
+                        <option value="unidad">Por Unidad (ej. 1x0.55)</option>
+                        <option value="libras">Por Libras</option>
+                        <option value="cajitas">Por Cajitas</option>
+                      </select>
+                    </div>
+                    {tipoVenta === 'promocion' && (
+                      <div>
+                        <label className="block text-sm font-medium text-gray-700 mb-1">Unidades por promo</label>
+                        <input type="number" value={unidadesPorPromo} onChange={(e) => setUnidadesPorPromo(e.target.value)} required className="border p-2 rounded w-full" placeholder="Ej. 3" />
+                      </div>
+                    )}
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-1">Precio de Venta ($)</label>
+                      <input type="number" step="0.01" value={precioVenta} onChange={(e) => setPrecioVenta(e.target.value)} required className="border p-2 rounded w-full" placeholder="Ej. 1.25" />
+                    </div>
+                  </div>
+                  <button type="submit" disabled={guardando} className="w-full bg-green-600 text-white p-2 rounded font-bold hover:bg-green-700">Guardar Fruta</button>
+                </form>
+              )}
+            </div>
+
+            {/* Tabla de Inventario */}
             <div className="bg-white p-4 sm:p-6 rounded-lg shadow-sm border border-gray-200 space-y-4">
-              <h2 className="text-lg font-semibold text-gray-700">Control de Inventario</h2>
-              <p className="text-sm text-gray-500 mb-2">
-                Para Uvas y Arándanos anota las cajas exactas. Para Mandarinas, Peras y Naranjas anota las unidades reales contadas.
-              </p>
-              
+              <h2 className="text-lg font-semibold text-gray-700">Resumen del Lote</h2>
               <div className="overflow-x-auto">
-                <table className="w-full text-sm text-left min-w-[600px]">
+                <table className="w-full text-sm text-left min-w-150">
                   <thead className="bg-gray-100 text-gray-600">
                     <tr>
                       <th className="p-2">Producto</th>
@@ -159,74 +258,46 @@ export default function InventarioPage() {
                       <th className="p-2 text-center">Mermas</th>
                       <th className="p-2 text-center">Vendido</th>
                       <th className="p-2 text-center">Sobrante</th>
+                      <th className="p-2 text-center">Acción</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-gray-100">
-                    {productos.map(prod => {
-                      const cajas = inventario[prod.id]?.cajas || 0
-                      const unidadesReales = inventario[prod.id]?.unidades_reales || 0
-                      const mermas = inventario[prod.id]?.mermas || 0
+                    {inventario.map(item => {
+                      const prod = item.productos
                       const vendido = ventasPorProducto[prod.id] || 0
                       
-                      // Determinar si es producto de "caja fija" (Uvas y Arándanos)
-                      const esCajaFija = prod.nombre.includes('Uva') || prod.nombre.includes('Arándano')
-                      
-                      let totalDisponible = 0
-                      if (esCajaFija) {
-                        // Uvas y arándanos: 18 unidades por caja
-                        totalDisponible = (cajas * 18) - mermas
-                      } else {
-                        // Mandarinas, peras y naranjas: usamos las unidades reales
-                        totalDisponible = unidadesReales - mermas
+                      // Cálculo inteligente: si unidades_reales es 0, usamos las cajas * 18 (para uvas) o cajas * unidades
+                      let unidadesBase = item.unidades_reales || 0
+                      if (unidadesBase === 0 && item.cajas > 0) {
+                        // Asumimos 18 si es uva o arándano, o la cantidad de la caja si está definida
+                        unidadesBase = item.cajas * (prod.unidades_por_caja || 18) 
                       }
-                      
-                      const promosDisponibles = totalDisponible / prod.unidades_por_promo
+
+                      const totalDisponible = unidadesBase - (item.mermas || 0)
+                      const promosDisponibles = totalDisponible / (prod.unidades_por_promo || 1)
                       const sobrante = promosDisponibles - vendido
 
                       return (
-                        <tr key={prod.id}>
+                        <tr key={item.id}>
                           <td className="p-2 font-medium text-gray-800">
                             {prod.nombre}
                             <span className="block text-xs text-gray-400 font-normal">
-                              {esCajaFija ? '(Caja fija de 18)' : '(Conteo variable)'}
+                              ({item.tipo_caja === 'completa' ? 'Caja Completa' : 'Media Caja'})
                             </span>
                           </td>
-                          <td className="p-2 text-center">
-                            {esCajaFija ? (
-                              // Entrada para cajas fijas
-                              <div className="flex flex-col items-center">
-                                <input 
-                                  type="number" min="0"
-                                  value={cajas || ''}
-                                  onChange={(e) => handleInput(prod.id, 'cajas', e.target.value)}
-                                  className="border p-2 rounded w-24 text-center text-gray-800 font-bold bg-blue-50"
-                                  placeholder="Cajas"
-                                />
-                                <span className="text-xs text-gray-500 mt-1">{cajas * 18} unidades</span>
-                              </div>
-                            ) : (
-                              // Entrada para conteo variable
-                              <input 
-                                type="number" min="0"
-                                value={unidadesReales || ''}
-                                onChange={(e) => handleInput(prod.id, 'unidades_reales', e.target.value)}
-                                className="border p-2 rounded w-24 text-center text-gray-800 font-bold bg-blue-50"
-                                placeholder="Unidades"
-                              />
-                            )}
+                          <td className="p-2 text-center font-bold text-blue-600">
+                            {unidadesBase} 
+                            <span className="block text-xs text-gray-400 font-normal">
+                              {prod.tipo_venta === 'libras' ? 'libras' : prod.tipo_venta === 'cajitas' ? 'cajitas' : 'unidades'}
+                            </span>
                           </td>
-                          <td className="p-2 text-center">
-                            <input 
-                              type="number" min="0"
-                              value={mermas || ''}
-                              onChange={(e) => handleInput(prod.id, 'mermas', e.target.value)}
-                              className="border p-2 rounded w-20 text-center text-gray-800"
-                              placeholder="0"
-                            />
-                          </td>
+                          <td className="p-2 text-center">{item.mermas || 0}</td>
                           <td className="p-2 text-center font-semibold text-blue-600">{vendido}</td>
                           <td className={`p-2 text-center font-bold ${sobrante < 0 ? 'text-red-600' : 'text-green-600'}`}>
                             {sobrante % 1 === 0 ? sobrante : sobrante.toFixed(2)}
+                          </td>
+                          <td className="p-2 text-center">
+                            <button onClick={() => abrirEdicion(item)} className="text-blue-600 hover:underline text-sm font-medium">Editar</button>
                           </td>
                         </tr>
                       )
@@ -234,9 +305,29 @@ export default function InventarioPage() {
                   </tbody>
                 </table>
               </div>
-              <button onClick={guardarInventario} disabled={guardando} className="w-full bg-gray-800 text-white p-3 rounded-lg font-bold hover:bg-gray-900">
-                Guardar Inventario
-              </button>
+            </div>
+          </div>
+        )}
+
+        {/* MODAL DE EDICIÓN */}
+        {editandoItem && (
+          <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
+            <div className="bg-white p-6 rounded-xl shadow-lg w-full max-w-md">
+              <h3 className="text-lg font-bold mb-4">Editar: {editandoItem.productos.nombre}</h3>
+              <form onSubmit={guardarEdicion} className="space-y-4">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Cantidad de Entrada (Unidades/Libras)</label>
+                  <input type="number" value={editCantidad} onChange={(e) => setEditCantidad(e.target.value)} required className="border p-2 rounded w-full" />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Mermas</label>
+                  <input type="number" value={editMermas} onChange={(e) => setEditMermas(e.target.value)} required className="border p-2 rounded w-full" />
+                </div>
+                <div className="flex gap-2 pt-2">
+                  <button type="button" onClick={() => setEditandoItem(null)} className="flex-1 bg-gray-200 text-gray-700 p-2 rounded font-bold">Cancelar</button>
+                  <button type="submit" disabled={guardando} className="flex-1 bg-green-600 text-white p-2 rounded font-bold">Guardar</button>
+                </div>
+              </form>
             </div>
           </div>
         )}
